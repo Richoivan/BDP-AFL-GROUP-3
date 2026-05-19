@@ -1,5 +1,3 @@
-version: "3.8"
-
 # =============================================================
 # Big Data Processing - Final Project
 # Pipeline: Kafka (ingest) -> Spark (batch + streaming) ->

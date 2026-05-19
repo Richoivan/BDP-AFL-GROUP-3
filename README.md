@@ -61,7 +61,6 @@ Data-flow: `CSV -> Producer -> Kafka -> Spark Streaming -> MinIO -> Dashboard`,
 and in parallel `CSV -> Spark Batch -> MinIO + CSV -> Dashboard`.
 
 ---
-
 ## 2. Project Description
 
 The project implements a complete big data pipeline covering the five
