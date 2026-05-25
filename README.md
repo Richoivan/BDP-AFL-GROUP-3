@@ -275,20 +275,26 @@ The **working sequence** is therefore:
 2. **Run the batch job:**
 
    ```powershell
-   docker compose run --rm spark-master `
-     /opt/bitnami/spark/bin/spark-submit `
+   docker exec spark-master /opt/bitnami/spark/bin/spark-submit `
      --master spark://spark-master:7077 `
-     --conf spark.cores.max=2 `
-     --conf spark.executor.cores=1 `
-     --conf spark.executor.memory=1g `
+     --conf spark.cores.max=4 `
+     --conf spark.executor.cores=2 `
+     --conf spark.executor.memory=2g `
      --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 `
      --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 `
      --conf spark.hadoop.fs.s3a.access.key=minioadmin `
      --conf spark.hadoop.fs.s3a.secret.key=minioadmin `
      --conf spark.hadoop.fs.s3a.path.style.access=true `
      --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem `
+     --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false `
      /opt/jobs/batch_analysis.py
    ```
+
+   We use `docker exec` (not `docker compose run`) so the job reuses
+   the already-running `spark-master` container instead of spawning a
+   fresh one. Because the streaming job is stopped in step 1, the
+   worker has all four cores free, so the batch job is given the full
+   `cores.max=4 / executor.cores=2 / executor.memory=2g`.
 
    First run also downloads `hadoop-aws` + `aws-java-sdk-bundle` from
    Maven Central (~270 MB, ~1-2 minutes). After that the job reads
