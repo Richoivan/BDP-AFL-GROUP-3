@@ -64,10 +64,11 @@ services:
       - minio-data:/data
     command: server /data --console-address ":9001"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live 2>/dev/null || wget -q --spider http://localhost:9000/minio/health/live 2>/dev/null || exit 1"]
       interval: 10s
-      timeout: 5s
-      retries: 10
+      timeout: 10s
+      retries: 20
+      start_period: 30s
     networks:
       - bigdata-net
 
@@ -78,10 +79,18 @@ services:
     image: minio/mc:RELEASE.2024-08-17T11-33-50Z
     container_name: minio-setup
     depends_on:
-      minio:
-        condition: service_healthy
+      - minio
     entrypoint: >
       /bin/sh -c "
+      echo 'Waiting for MinIO to be ready...';
+      for i in $$(seq 1 60); do
+        if mc alias set local http://minio:9000 minioadmin minioadmin 2>/dev/null; then
+          echo 'MinIO is ready';
+          break;
+        fi;
+        echo \"Attempt $$i: MinIO not ready yet, retrying in 3s...\";
+        sleep 3;
+      done;
       mc alias set local http://minio:9000 minioadmin minioadmin;
       mc mb -p local/raw-events || true;
       mc mb -p local/batch-results || true;
