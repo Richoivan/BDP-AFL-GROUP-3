@@ -1,16 +1,19 @@
 """
 Spark batch analysis job for RetailRocket.
 
-Reads the full events CSV from /opt/data (and/or the raw events that the
-streaming job has archived to MinIO) and computes a batch insight:
+Reads the full events CSV directly from HDFS (uploaded by the
+`hdfs-setup` container at startup) and computes a batch insight:
 
     -> Top 20 most viewed items
     -> Event-type distribution (view / addtocart / transaction)
     -> Daily active visitors
 
+Default input:  hdfs://namenode:9000/raw-data/events.csv
+Fallback input: /opt/data/events.csv (local Docker mount)
+
 Results are written:
-    - to MinIO bucket  s3a://batch-results/  as parquet + csv
-    - to /opt/results/batch/                  as csv (consumed by Streamlit)
+    - to HDFS  hdfs://namenode:9000/batch-results/  as parquet
+    - to /opt/results/batch/                        as csv (consumed by Streamlit)
 """
 
 import os
@@ -26,47 +29,79 @@ from pyspark.sql.types import (
 # ------------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------------
-DATA_FILE = os.getenv("DATA_FILE", "/opt/data/events.csv")
+HDFS_BASE = os.getenv("HDFS_BASE", "hdfs://namenode:9000")
+
+# Primary input: events.csv on HDFS. Fallback: local Docker volume.
+DATA_FILE = os.getenv("DATA_FILE", f"{HDFS_BASE}/raw-data/events.csv")
+DATA_FILE_LOCAL_FALLBACK = os.getenv("DATA_FILE_LOCAL", "/opt/data/events.csv")
+
 LOCAL_OUT = os.getenv("BATCH_OUT_LOCAL", "/opt/results/batch")
-S3_OUT = os.getenv("BATCH_OUT_S3", "s3a://batch-results")
-
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
+HDFS_OUT = f"{HDFS_BASE}/batch-results"
 
 
-def pick_data_file() -> str:
-    if os.path.exists(DATA_FILE):
-        return DATA_FILE
+def is_hdfs_path(path: str) -> bool:
+    return path.startswith("hdfs://") or path.startswith("hdfs:/")
+
+
+def pick_data_file(spark: SparkSession) -> str:
+    """
+    Decide whether to read events.csv from HDFS or from the local mount.
+
+    Tries the configured HDFS path first (via the Hadoop FileSystem API),
+    then falls back to the local file if HDFS isn't reachable or the file
+    isn't present in HDFS yet.
+    """
+    # Try HDFS path first
+    if is_hdfs_path(DATA_FILE):
+        try:
+            jvm = spark.sparkContext._jvm
+            hconf = spark.sparkContext._jsc.hadoopConfiguration()
+            hpath = jvm.org.apache.hadoop.fs.Path(DATA_FILE)
+            fs = hpath.getFileSystem(hconf)
+            if fs.exists(hpath):
+                print(f"[batch] Using HDFS input: {DATA_FILE}")
+                return DATA_FILE
+            else:
+                print(f"[batch] HDFS path {DATA_FILE} does not exist yet, falling back to local.")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[batch] WARN: could not check HDFS path ({exc}). Falling back to local.")
+    else:
+        # DATA_FILE itself is a local path — use as-is if it exists
+        if os.path.exists(DATA_FILE):
+            print(f"[batch] Using local input: {DATA_FILE}")
+            return DATA_FILE
+
+    # Local fallback
+    if os.path.exists(DATA_FILE_LOCAL_FALLBACK):
+        print(f"[batch] Using local fallback input: {DATA_FILE_LOCAL_FALLBACK}")
+        return DATA_FILE_LOCAL_FALLBACK
+
     raise FileNotFoundError(
-        f"{DATA_FILE} not found. Download the RetailRocket dataset from "
-        "https://www.kaggle.com/datasets/retailrocket/ecommerce-dataset "
-        "and place events.csv at ./data/events.csv before running this job."
+        f"Could not find events.csv in HDFS ({DATA_FILE}) or local "
+        f"({DATA_FILE_LOCAL_FALLBACK}). Download the RetailRocket dataset "
+        "from https://www.kaggle.com/datasets/retailrocket/ecommerce-dataset "
+        "and place events.csv at ./data/events.csv before running this job. "
+        "The hdfs-setup container will upload it to HDFS automatically on the "
+        "next docker compose up."
     )
 
 
 def build_spark() -> SparkSession:
     return (
         SparkSession.builder.appName("RetailRocketBatchAnalysis")
-        .config("spark.hadoop.fs.s3a.endpoint", MINIO_ENDPOINT)
-        .config("spark.hadoop.fs.s3a.access.key", MINIO_ACCESS_KEY)
-        .config("spark.hadoop.fs.s3a.secret.key", MINIO_SECRET_KEY)
-        .config("spark.hadoop.fs.s3a.path.style.access", "true")
-        .config(
-            "spark.hadoop.fs.s3a.impl",
-            "org.apache.hadoop.fs.s3a.S3AFileSystem",
-        )
-        .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
+        .config("spark.hadoop.fs.defaultFS", HDFS_BASE)
+        .config("spark.hadoop.dfs.client.use.datanode.hostname", "true")
         .getOrCreate()
     )
 
 
 def main() -> None:
-    data_path = pick_data_file()
     os.makedirs(LOCAL_OUT, exist_ok=True)
 
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")
+
+    data_path = pick_data_file(spark)
 
     schema = StructType(
         [
@@ -117,24 +152,28 @@ def main() -> None:
     )
 
     # ---------------- Write results: local CSV ---------------------------
+    # IMPORTANT: prefix with file:// so Spark writes to the local
+    # filesystem of the worker (mounted from host ./results), and NOT to
+    # HDFS (which is the default fs.defaultFS configured for this job).
     def write_local(df_out, name: str) -> None:
         out_path = os.path.join(LOCAL_OUT, name)
+        spark_path = f"file://{out_path}"
         # coalesce so the dashboard sees a single CSV file
-        df_out.coalesce(1).write.mode("overwrite").option("header", True).csv(out_path)
+        df_out.coalesce(1).write.mode("overwrite").option("header", True).csv(spark_path)
         print(f"[batch] wrote {out_path}")
 
     write_local(top_items, "top_items")
     write_local(event_dist, "event_distribution")
     write_local(daily_visitors, "daily_visitors")
 
-    # ---------------- Write results: MinIO parquet -----------------------
+    # ---------------- Write results: HDFS parquet ------------------------
     try:
-        top_items.write.mode("overwrite").parquet(f"{S3_OUT}/top_items")
-        event_dist.write.mode("overwrite").parquet(f"{S3_OUT}/event_distribution")
-        daily_visitors.write.mode("overwrite").parquet(f"{S3_OUT}/daily_visitors")
-        print(f"[batch] wrote parquet outputs to {S3_OUT}")
+        top_items.write.mode("overwrite").parquet(f"{HDFS_OUT}/top_items")
+        event_dist.write.mode("overwrite").parquet(f"{HDFS_OUT}/event_distribution")
+        daily_visitors.write.mode("overwrite").parquet(f"{HDFS_OUT}/daily_visitors")
+        print(f"[batch] wrote parquet outputs to {HDFS_OUT}")
     except Exception as exc:  # noqa: BLE001
-        print(f"[batch] WARN: could not write to MinIO ({exc}). Local CSVs are still available.")
+        print(f"[batch] WARN: could not write to HDFS ({exc}). Local CSVs are still available.")
 
     print("[batch] === Top 20 viewed items ===")
     top_items.show(truncate=False)

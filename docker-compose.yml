@@ -1,7 +1,7 @@
 # =============================================================
 # Big Data Processing - Final Project
 # Pipeline: Kafka (ingest) -> Spark (batch + streaming) ->
-#           MinIO (distributed storage) -> Streamlit (dashboard)
+#           HDFS (distributed storage) -> Streamlit (dashboard)
 # =============================================================
 
 services:
@@ -48,23 +48,26 @@ services:
       - bigdata-net
 
   # -----------------------------
-  # MinIO (S3-compatible storage)
-  # acts as the distributed store
+  # HDFS NameNode (distributed storage - master)
   # -----------------------------
-  minio:
-    image: minio/minio:RELEASE.2024-08-17T01-24-54Z
-    container_name: minio
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    hostname: namenode
     ports:
-      - "9000:9000"     # S3 API
-      - "9001:9001"     # Web console
+      - "9870:9870"     # Web UI (Hadoop 3.x)
+      - "9000:9000"     # HDFS RPC (fs.defaultFS)
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      - CLUSTER_NAME=bigdata-cluster
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_replication=1
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
     volumes:
-      - minio-data:/data
-    command: server /data --console-address ":9001"
+      - hadoop_namenode:/hadoop/dfs/name
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live 2>/dev/null || wget -q --spider http://localhost:9000/minio/health/live 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:9870 2>/dev/null || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 20
@@ -73,29 +76,70 @@ services:
       - bigdata-net
 
   # -----------------------------
-  # MinIO bucket bootstrap
+  # HDFS DataNode (distributed storage - worker)
   # -----------------------------
-  minio-setup:
-    image: minio/mc:RELEASE.2024-08-17T11-33-50Z
-    container_name: minio-setup
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    hostname: datanode
     depends_on:
-      - minio
+      - namenode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_replication=1
+      - HDFS_CONF_dfs_datanode_data_dir=file:///hadoop/dfs/data
+      - HDFS_CONF_dfs_permissions_enabled=false
+      - SERVICE_PRECONDITION=namenode:9870
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+    networks:
+      - bigdata-net
+
+  # -----------------------------
+  # HDFS bootstrap - creates project directories AND uploads events.csv
+  # so the batch job can read the dataset from HDFS itself.
+  # -----------------------------
+  hdfs-setup:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hdfs-setup
+    depends_on:
+      - namenode
+      - datanode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    volumes:
+      - ./data:/data:ro
     entrypoint: >
-      /bin/sh -c "
-      echo 'Waiting for MinIO to be ready...';
+      /bin/bash -c "
+      echo 'Waiting for HDFS to leave safemode...';
       for i in $$(seq 1 60); do
-        if mc alias set local http://minio:9000 minioadmin minioadmin 2>/dev/null; then
-          echo 'MinIO is ready';
+        if hdfs dfsadmin -fs hdfs://namenode:9000 -safemode get 2>/dev/null | grep -q 'OFF'; then
+          echo 'HDFS is out of safemode';
           break;
         fi;
-        echo \"Attempt $$i: MinIO not ready yet, retrying in 3s...\";
+        echo \"Attempt $$i: HDFS not ready, retrying in 3s...\";
         sleep 3;
       done;
-      mc alias set local http://minio:9000 minioadmin minioadmin;
-      mc mb -p local/raw-events || true;
-      mc mb -p local/batch-results || true;
-      mc mb -p local/stream-results || true;
-      echo 'MinIO buckets ready';
+      hdfs dfs -fs hdfs://namenode:9000 -mkdir -p /raw-data &&
+      hdfs dfs -fs hdfs://namenode:9000 -mkdir -p /raw-events &&
+      hdfs dfs -fs hdfs://namenode:9000 -mkdir -p /batch-results &&
+      hdfs dfs -fs hdfs://namenode:9000 -mkdir -p /stream-results &&
+      hdfs dfs -fs hdfs://namenode:9000 -chmod -R 777 /raw-data /raw-events /batch-results /stream-results;
+      echo '-----';
+      if [ -f /data/events.csv ]; then
+        echo 'Uploading events.csv to HDFS /raw-data/events.csv...';
+        if hdfs dfs -fs hdfs://namenode:9000 -test -e /raw-data/events.csv; then
+          echo 'events.csv already exists in HDFS, skipping upload.';
+        else
+          hdfs dfs -fs hdfs://namenode:9000 -copyFromLocal /data/events.csv /raw-data/events.csv &&
+          echo 'events.csv uploaded to HDFS successfully.';
+        fi;
+        hdfs dfs -fs hdfs://namenode:9000 -ls -h /raw-data;
+      else
+        echo 'WARN: /data/events.csv not found - skipping HDFS upload. Batch job will fail until events.csv is available.';
+      fi;
+      echo 'HDFS bootstrap complete';
       exit 0;
       "
     networks:
@@ -113,6 +157,7 @@ services:
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
+      - HADOOP_CONF_DIR=/opt/hadoop-conf
     ports:
       - "8080:8080"
       - "7077:7077"
@@ -171,7 +216,7 @@ services:
 
   # -----------------------------
   # Spark Streaming job
-  # consumes Kafka -> MinIO + CSV
+  # consumes Kafka -> HDFS + CSV
   # -----------------------------
   streaming-job:
     image: bitnamilegacy/spark:3.5.1
@@ -181,8 +226,10 @@ services:
         condition: service_healthy
       spark-master:
         condition: service_started
-      minio-setup:
-        condition: service_completed_successfully
+      namenode:
+        condition: service_started
+      datanode:
+        condition: service_started
     volumes:
       - ./jobs:/opt/jobs
       - ./results:/opt/results
@@ -194,13 +241,9 @@ services:
       --conf spark.cores.max=2
       --conf spark.executor.cores=1
       --conf spark.executor.memory=1g
-      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262
-      --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000
-      --conf spark.hadoop.fs.s3a.access.key=minioadmin
-      --conf spark.hadoop.fs.s3a.secret.key=minioadmin
-      --conf spark.hadoop.fs.s3a.path.style.access=true
-      --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
-      --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1
+      --conf spark.hadoop.fs.defaultFS=hdfs://namenode:9000
+      --conf spark.hadoop.dfs.client.use.datanode.hostname=true
       /opt/jobs/streaming_job.py
     networks:
       - bigdata-net
@@ -214,21 +257,23 @@ services:
       context: ./dashboard
     container_name: dashboard
     depends_on:
-      - minio
+      - namenode
     ports:
       - "8501:8501"
     environment:
       RESULTS_DIR: /results
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      DATA_DIR: /data
+      DATA_FILE: /data/events.csv
+      HDFS_NAMENODE: http://namenode:9870
     volumes:
       - ./results:/results
+      - ./data:/data:ro
     networks:
       - bigdata-net
 
 volumes:
-  minio-data:
+  hadoop_namenode:
+  hadoop_datanode:
 
 networks:
   bigdata-net:

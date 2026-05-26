@@ -1,9 +1,9 @@
 # Big Data Processing - Final Project
 
 End-to-end big data pipeline for the **RetailRocket E-commerce dataset**.
-Built with **Kafka, Apache Spark (batch + Structured Streaming), MinIO,
-and Streamlit**, fully orchestrated by **Docker Compose** and runnable on
-a single laptop.
+Built with **Kafka, Apache Spark (batch + Structured Streaming), HDFS
+(Hadoop Distributed File System), and Streamlit**, fully orchestrated
+by **Docker Compose** and runnable on a single laptop.
 
 ---
 
@@ -15,50 +15,64 @@ a single laptop.
                   |  (RetailRocket)     |
                   +----------+----------+
                              |
-                             v
-                  +---------------------+
-                  |   Kafka Producer    |   (Python)
-                  |  producer/producer  |
-                  +----------+----------+
-                             | JSON events
-                             v
-+----------+         +---------------------+
-| Zookeeper|<------->|   Kafka Broker      |   topic: events
-+----------+         +----------+----------+
-                                |
-                                v
-                   +-----------------------------+
-                   |   Spark Structured Streaming |
-                   |   jobs/streaming_job.py     |
-                   |   - events per minute       |
-                   |   - raw event archive       |
-                   +------+------------+---------+
-                          |            |
-              parquet     |            | csv snapshot
-                          v            v
-                +-----------------+   +------------------+
-                |     MinIO       |   |  ./results/      |
-                |  (S3-compatible)|   |  (local volume)  |
-                |  raw-events/    |   |  stream/         |
-                |  stream-results/|   |  batch/          |
-                |  batch-results/ |   +---------+--------+
-                +--------+--------+             |
-                         ^                      |
-                         |  parquet/csv         |
-                         |                      v
-              +----------+--------+    +------------------+
-              | Spark Batch Job   |    |   Streamlit      |
-              | jobs/batch_       |    |   dashboard/app  |
-              | analysis.py       |    |   - live charts  |
-              | top items, etc.   |    |   - batch charts |
-              +-------------------+    +---------+--------+
-                                                 |
-                                                 v
-                                       http://localhost:8501
+                  +----------+-----------+
+                  |                      |
+                  v                      v
+       +---------------------+   +-------------------+
+       |   Kafka Producer    |   |    hdfs-setup     |
+       |  producer/producer  |   |   (one-shot)      |
+       +----------+----------+   |  uploads CSV ->   |
+                  | JSON events  |  HDFS /raw-data   |
+                  v              +---------+---------+
++----------+   +-------------+             |
+| Zookeeper|<->|  Kafka      |             |
++----------+   +-----+-------+             |
+                     |                     |
+                     v                     v
+        +-----------------------------+   +-----------------------------+
+        |  Spark Structured Streaming |   |     HDFS Cluster            |
+        |  jobs/streaming_job.py      |   |    (Distributed FS)         |
+        |  - events per minute        |   |  +-----------------------+  |
+        |  - raw event archive        |   |  |     NameNode          |  |
+        +------+------------+---------+   |  |    (metadata)         |  |
+               |            |             |  +-----------+-----------+  |
+       parquet |            | csv snap    |              |              |
+               |            |             |  +-----------v-----------+  |
+               v            v             |  |     DataNode          |  |
+       +-------+-------+  +--+-------+    |  |    (blocks)           |  |
+       |  HDFS write   |  | local    |    |  +-----------------------+  |
+       +-------+-------+  | /results |    |                             |
+               |          +----+-----+    |  /raw-data/events.csv       |
+               v               |          |  /raw-events/               |
+       +---------------+       |          |  /stream-results/           |
+       |  HDFS dirs:   |<------+--------->|  /batch-results/            |
+       |  /stream-     |       |          +-------------+---------------+
+       |  /raw-events  |       |                        ^
+       |  /batch-      |       |                        | reads
+       +---------------+       |                        | events.csv
+                               v                        | & writes
+                       +---------------+    +-----------+---------+
+                       |   Streamlit   |    | Spark Batch Job     |
+                       |  dashboard    |    | jobs/batch_         |
+                       |  - live KPIs  |    | analysis.py         |
+                       |  - funnel     |    | top items, etc.     |
+                       |  - batch      |    +---------------------+
+                       +-------+-------+
+                               |
+                               v
+                       http://localhost:8501
 ```
 
-Data-flow: `CSV -> Producer -> Kafka -> Spark Streaming -> MinIO -> Dashboard`,
-and in parallel `CSV -> Spark Batch -> MinIO + CSV -> Dashboard`.
+Data-flow (two parallel paths):
+
+1. **Stream path:** `CSV -> Producer -> Kafka -> Spark Streaming -> HDFS (raw-events, stream-results) -> Dashboard`
+2. **Batch path:** `CSV -> hdfs-setup (upload to HDFS /raw-data) -> Spark Batch reads from HDFS -> HDFS (batch-results) + local CSV -> Dashboard`
+
+This means the dataset itself **lives in HDFS** (uploaded automatically
+by the `hdfs-setup` container on first start). The batch job reads
+`events.csv` directly from HDFS, demonstrating end-to-end use of
+distributed storage as the dataset source — not just as a results
+sink.
 
 ---
 ## 2. Project Description
@@ -66,21 +80,28 @@ and in parallel `CSV -> Spark Batch -> MinIO + CSV -> Dashboard`.
 The project implements a complete big data pipeline covering the five
 required capabilities of the course:
 
-1. **Distributed storage** - MinIO (S3-compatible object store) holds
-   raw events, batch results, and streaming results in dedicated buckets.
-2. **Batch processing** - Apache Spark reads the full `events.csv` and
-   computes historical insights (top items, event distribution, daily
-   active visitors).
+1. **Distributed storage** - HDFS (Hadoop Distributed File System) with
+   a dedicated NameNode (metadata) and DataNode (block storage), running
+   in Docker containers. Holds the **raw dataset itself** (`events.csv`
+   uploaded to `/raw-data/`), raw streamed events, batch results, and
+   streaming results in dedicated HDFS directories. The dataset is
+   uploaded automatically on the first `docker compose up` by the
+   `hdfs-setup` bootstrap container.
+2. **Batch processing** - Apache Spark reads the full `events.csv`
+   **directly from HDFS** (`hdfs://namenode:9000/raw-data/events.csv`)
+   and computes historical insights (top items, event distribution,
+   daily active visitors).
 3. **Stream ingestion** - A Python Kafka producer reads the CSV row by
    row and publishes JSON events to the Kafka topic `events`,
    simulating live user activity on an e-commerce site.
 4. **Stream processing** - Spark Structured Streaming consumes the
    Kafka topic, computes a windowed real-time metric (events per
    minute by event type) with a 2-minute watermark, and writes both
-   to MinIO (parquet) and to a local CSV snapshot.
+   to HDFS (parquet) and to a local CSV snapshot.
 5. **Live visualization** - A Streamlit dashboard reads the streaming
    CSV snapshot and the batch CSV outputs and refreshes every few
-   seconds to show live KPIs, charts, and tables.
+   seconds to show live KPIs, charts, a dataset-date indicator, and a
+   conversion funnel.
 
 Everything is packaged in a single `docker-compose.yml` so the grader
 can run the whole system with one command.
@@ -97,15 +118,15 @@ analytics team must answer two very different kinds of questions:
   the breakdown of event types? How does daily active traffic evolve?
   These need **batch processing** over the full history.
 - **Operational:** What is happening *right now*? Is traffic spiking?
-  Are users still adding items to cart? These need **real-time stream
-  processing** with sub-minute latency.
+  Are users still adding items to cart? What is the live conversion
+  funnel? These need **real-time stream processing** with sub-minute
+  latency.
 
 A traditional single-machine pipeline cannot serve both needs at the
 laptop scale required by the course. This project demonstrates how a
-distributed architecture (Kafka + Spark + object storage) cleanly
-separates ingest, batch, and stream layers while running locally
-under Docker Compose, and surfaces the results in a single live
-dashboard.
+distributed architecture (Kafka + Spark + HDFS) cleanly separates
+ingest, batch, and stream layers while running locally under Docker
+Compose, and surfaces the results in a single live dashboard.
 
 ---
 
@@ -150,7 +171,7 @@ with a backslash `\`.
 - **Docker Desktop** running, with Docker Compose v2
 - At least **8 GB of RAM** allocated to Docker
   (Settings -> Resources -> Memory)
-- ~5 GB free disk for images and volumes
+- ~6 GB free disk for images and HDFS volumes
 - **Python 3** installed locally (only used by the dataset download
   helper)
 - A **Kaggle account** (required by `kagglehub` to download the dataset)
@@ -196,9 +217,9 @@ docker compose up -d --build
 ```
 
 The first run downloads several GB of Docker images
-(Zookeeper, Kafka, MinIO, Bitnami Spark, Python builds for the
-producer and dashboard). Expect **5-10 minutes** on the first run;
-subsequent starts are much faster.
+(Zookeeper, Kafka, HDFS NameNode + DataNode, Bitnami Spark, Python builds
+for the producer and dashboard). Expect **5-10 minutes** on the first
+run; subsequent starts are much faster.
 
 ### 5.4. Verify all services are running
 
@@ -206,21 +227,22 @@ subsequent starts are much faster.
 docker compose ps
 ```
 
-You should see **9 containers**. All should be `Up`/`running` except
-`minio-setup` which is a one-shot bucket creator and finishes as
+You should see **10 containers**. All should be `Up`/`running` except
+`hdfs-setup` which is a one-shot HDFS directory creator and finishes as
 `Exited (0)`:
 
-| Container       | Role                                     |
-|-----------------|------------------------------------------|
-| zookeeper       | Kafka coordinator                        |
-| kafka           | Stream-ingest broker                     |
-| minio           | Distributed object storage               |
-| minio-setup     | One-shot bucket creator (Exited 0 is OK) |
-| spark-master    | Spark cluster master                     |
-| spark-worker    | Spark cluster worker (4 cores / 4 GB)    |
-| producer        | Kafka producer streaming events.csv      |
-| streaming-job   | Spark Structured Streaming consumer      |
-| dashboard       | Streamlit live dashboard                 |
+| Container       | Role                                       |
+|-----------------|--------------------------------------------|
+| zookeeper       | Kafka coordinator                          |
+| kafka           | Stream-ingest broker                       |
+| namenode        | HDFS NameNode (metadata server)            |
+| datanode        | HDFS DataNode (block storage)              |
+| hdfs-setup     | One-shot HDFS dir creator + uploads events.csv to HDFS (Exited 0 is OK) |
+| spark-master    | Spark cluster master                       |
+| spark-worker    | Spark cluster worker (4 cores / 4 GB)      |
+| producer        | Kafka producer streaming events.csv        |
+| streaming-job   | Spark Structured Streaming consumer        |
+| dashboard       | Streamlit live dashboard                   |
 
 ### 5.5. Watch the streaming job warm up (optional)
 
@@ -251,8 +273,16 @@ You will see:
 
 - A KPI row (events in latest minute, total events processed,
   distinct event types)
+- A **dataset date indicator** showing the earliest and latest event
+  dates **from the RetailRocket dataset itself** (e.g.,
+  *Earliest event: Sunday, 03 May 2015 - Latest event: Friday,
+  18 September 2015*), plus the total event count. These dates come
+  from the `timestamp` column of `data/events.csv`, not from the
+  wall-clock streaming time, so they truly reflect the dataset.
 - A line chart **"events per minute"** split by event type
 - A **"Latest minute breakdown"** table
+- A **"Conversion funnel (live)"** chart showing view → add-to-cart →
+  transaction with conversion rates from the live stream
 - A **"Batch insights"** section that currently says
   *"No batch results yet. Run the batch job..."* - this is normal,
   it gets populated in the next step.
@@ -280,13 +310,8 @@ The **working sequence** is therefore:
      --conf spark.cores.max=4 `
      --conf spark.executor.cores=2 `
      --conf spark.executor.memory=2g `
-     --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 `
-     --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 `
-     --conf spark.hadoop.fs.s3a.access.key=minioadmin `
-     --conf spark.hadoop.fs.s3a.secret.key=minioadmin `
-     --conf spark.hadoop.fs.s3a.path.style.access=true `
-     --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem `
-     --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false `
+     --conf spark.hadoop.fs.defaultFS=hdfs://namenode:9000 `
+     --conf spark.hadoop.dfs.client.use.datanode.hostname=true `
      /opt/jobs/batch_analysis.py
    ```
 
@@ -296,10 +321,13 @@ The **working sequence** is therefore:
    worker has all four cores free, so the batch job is given the full
    `cores.max=4 / executor.cores=2 / executor.memory=2g`.
 
-   First run also downloads `hadoop-aws` + `aws-java-sdk-bundle` from
-   Maven Central (~270 MB, ~1-2 minutes). After that the job reads
-   the full 2.75M-row CSV and computes the insights - expect
-   **2-5 minutes** total on a typical laptop.
+   The batch job reads the dataset **directly from HDFS**
+   (`hdfs://namenode:9000/raw-data/events.csv`, uploaded by
+   `hdfs-setup`) and writes results back to HDFS. No `--packages` are
+   required because the Spark image already ships the HDFS client.
+   If for any reason the HDFS path is unreachable, the job falls back
+   automatically to the local mount at `/opt/data/events.csv`.
+   Expect **2-5 minutes** total on a typical laptop.
 
    Final console output should look like:
 
@@ -308,7 +336,7 @@ The **working sequence** is therefore:
    [batch] wrote /opt/results/batch/top_items
    [batch] wrote /opt/results/batch/event_distribution
    [batch] wrote /opt/results/batch/daily_visitors
-   [batch] wrote parquet outputs to s3a://batch-results
+   [batch] wrote parquet outputs to hdfs://namenode:9000/batch-results
    [batch] === Top 20 viewed items ===
    +------+----------+
    |itemid|view_count|
@@ -340,30 +368,131 @@ now populated:
 
 - **Top 20 most viewed items** bar chart (the required batch insight)
 - **Event type distribution** bar chart
+- **Batch funnel** - full-dataset view → add-to-cart → transaction
 - **Daily active visitors** line chart
 
 The real-time section keeps refreshing every 5 seconds and shows new
-events flowing in from Kafka.
+events flowing in from Kafka, along with the live conversion funnel.
 
-### 5.9. Explore MinIO and Spark UIs (optional)
+### 5.9. Explore HDFS and Spark UIs (optional)
 
-- **MinIO console:** <http://localhost:9001>
-  Login: `minioadmin` / `minioadmin`. Open the three buckets:
-  - `raw-events/` - raw events archived by the streaming job
-  - `stream-results/events_per_minute/` - parquet aggregates
-  - `batch-results/top_items/` etc. - batch outputs
+- **HDFS NameNode UI:** <http://localhost:9870>
+  Click **Utilities → Browse the file system** to navigate into the
+  four project directories:
+  - `/raw-data/events.csv` - the **source dataset itself**, uploaded
+    to HDFS by `hdfs-setup` at first start; this is what the batch
+    job reads from
+  - `/raw-events/` - raw events archived by the streaming job
+  - `/stream-results/events_per_minute/` - parquet aggregates
+  - `/batch-results/top_items/`, `/batch-results/event_distribution/`,
+    `/batch-results/daily_visitors/` - batch outputs
+
+  The same UI shows live cluster health, the registered DataNode, and
+  per-block reports.
 - **Spark master UI:** <http://localhost:8080>
-  Shows the registered worker, running applications, and per-app
+  Shows the registered Spark worker, running applications, and per-app
   resource usage.
+
+You can also inspect HDFS from the command line:
+
+```powershell
+docker exec namenode hdfs dfs -ls /
+docker exec namenode hdfs dfs -ls -h /raw-data
+docker exec namenode hdfs dfs -ls /batch-results/top_items
+```
+
+The second command should show `events.csv` (~90 MB) sitting inside
+HDFS under `/raw-data`. That is the file the batch job reads.
 
 ### 5.10. Stop everything
 
 ```powershell
-docker compose down            # stop containers, keep MinIO data
-docker compose down -v         # stop AND wipe MinIO data + checkpoints
+docker compose down            # stop containers, keep HDFS data
+docker compose down -v         # stop AND wipe HDFS volumes + checkpoints
 ```
 
 Use `down -v` if you want a fully clean run next time.
+
+### 5.11. Troubleshooting (fresh clone from GitHub)
+
+If you just pulled this repo from GitHub and something is not working,
+work through this checklist before opening an issue.
+
+**(a) "Cannot connect to the Docker daemon"**
+Docker Desktop is not running. Open Docker Desktop, wait for the
+whale icon to be steady, then retry `docker compose up -d --build`.
+
+**(b) "events.csv not found" in `producer` or batch logs**
+You skipped section 5.2. Run `python download_dataset.py` (or place
+the file manually at `data/events.csv`), then `docker compose restart
+producer streaming-job` and (only on first ever start) re-run section
+5.3 so that `hdfs-setup` can upload the CSV into HDFS.
+
+**(c) `dependency failed to start` for any service**
+Run `docker compose down -v` then `docker compose up -d --build`
+again. The `-v` flag wipes the partially-initialised HDFS volumes,
+which is the most common cause of stuck startups on a fresh clone.
+
+**(d) Dashboard says "Waiting for the streaming job to produce
+results"**
+The streaming job is still downloading the `spark-sql-kafka`
+package from Maven Central on first run (~30 MB, 1-2 minutes).
+Watch progress with `docker compose logs -f streaming-job`. Once you
+see `[stream] batch 0: wrote N rows -> /opt/results/stream/...`, the
+dashboard will populate on the next 5-second refresh.
+
+**(e) Dashboard says "No batch results yet"**
+Run section 5.7 (stop streaming-job → submit batch → restart
+streaming-job). The dashboard refreshes automatically once
+`/results/batch/top_items/`, `/results/batch/event_distribution/`,
+and `/results/batch/daily_visitors/` are populated.
+
+**(f) Port already in use (`bind: address already in use`)**
+Another local service is using one of 2181 / 7077 / 8080 / 8501 /
+9000 / 9092 / 9870 / 29092. Either stop that service or change the
+left-hand side of the host:container port mapping in
+`docker-compose.yml`.
+
+**(g) Batch job hangs with "Initial job has not accepted any
+resources"**
+You forgot to `docker compose stop streaming-job` first. The
+streaming job is holding all executor slots on the worker. Stop it,
+re-run the batch command, then `docker compose start streaming-job`.
+
+**(h) "Permission denied" on Windows file mounts**
+Make sure the project folder is inside a directory that Docker
+Desktop is allowed to bind-mount (Settings → Resources → File
+Sharing). The default `C:\Users\<you>\Documents\...` is fine.
+
+### 5.12. Ports & URLs reference
+
+Every port the project exposes on the host machine, with the URL to
+open it. All UI ports below are safe to open from your browser
+(`localhost`).
+
+| Port | Service       | URL                                                 | What you see                                                                                                                                                                                            |
+|------|---------------|------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 8501 | Streamlit Dashboard | <http://localhost:8501>                        | The main live dashboard - real-time events per minute, dataset date banner, conversion funnel, batch insights (Top 20 items, distribution, daily visitors, batch funnel).                              |
+| 9870 | HDFS NameNode Web UI | <http://localhost:9870>                       | Cluster overview, DataNode list, capacity, safemode state. Use **Utilities → Browse the file system** to inspect `/raw-data/events.csv`, `/raw-events/`, `/stream-results/`, and `/batch-results/`.    |
+| 8080 | Spark Master UI | <http://localhost:8080>                            | Spark cluster status, the registered Spark worker, running applications and per-app resource usage.                                                                                                     |
+| 9000 | HDFS NameNode RPC | (internal - no browser UI)                       | `hdfs://namenode:9000` — used internally by Spark to talk to HDFS. You typically never open this in a browser; it is exposed on the host only so external tools (e.g. `hdfs` CLI on the host) could connect. |
+| 7077 | Spark Master RPC | (internal - no browser UI)                        | `spark://spark-master:7077` — Spark application submission endpoint. Used by `spark-submit` and Spark workers.                                                                                            |
+| 9092 | Kafka broker (in-cluster) | (internal - no browser UI)               | `kafka:9092` — used by the producer and the streaming job inside the Docker network. Not normally consumed from the host.                                                                                |
+| 29092 | Kafka broker (host listener) | (internal - no browser UI)             | `localhost:29092` — exposed for any host-side tool (e.g., `kafka-console-consumer.sh`) that wants to peek at the `events` topic from outside the container network.                                       |
+| 2181 | Zookeeper | (internal - no browser UI)                              | Used by Kafka for coordination. No useful UI; rarely accessed directly.                                                                                                                                  |
+
+**Important notes**
+
+- **This project uses HDFS, NOT MinIO.** All distributed storage runs
+  through HDFS NameNode (port 9870 UI / 9000 RPC) and a DataNode. There
+  is no MinIO, no S3 endpoint, no `9001` console, and no
+  `minioadmin/minioadmin` credentials in this stack.
+- HDFS in this project runs with `dfs.permissions.enabled=false` for
+  simplicity, so no HDFS authentication is required when browsing the
+  Web UI.
+- If any of the above ports is already in use on your machine (e.g.
+  another local Kafka or another HDFS), change the host side of the
+  mapping in `docker-compose.yml` (left of the colon in `"8080:8080"`).
 
 ---
 
@@ -377,24 +506,38 @@ After `docker compose up -d --build`:
 - `streaming-job` logs show micro-batch output like
   `[stream] batch 12: wrote 8 rows -> /opt/results/stream/events_per_minute`
   and a console table of `(window_start, event, event_count)`.
-- The MinIO console shows three buckets: `raw-events`,
-  `stream-results`, `batch-results`. Files appear in them within
-  ~30 seconds of the stream starting (and `batch-results` fills in
-  once you run section 5.7).
+- The HDFS NameNode UI at `http://localhost:9870` shows four project
+  directories under `/`: `raw-data` (containing `events.csv` uploaded
+  by `hdfs-setup`), `raw-events`, `stream-results`, and `batch-results`.
+  `raw-data/events.csv` appears immediately on first start. Files
+  appear in `raw-events` and `stream-results` within ~30 seconds of
+  the stream starting (and `batch-results` fills in once you run
+  section 5.7).
 
 In the **Streamlit dashboard at `http://localhost:8501`** you will see:
 
 **Real-time metric (live, refreshes every 5 s)**
 - KPI cards: events in latest minute, total events processed,
   distinct event types.
+- A **dataset date indicator** showing the earliest and latest event
+  dates from the **actual RetailRocket dataset** (e.g.,
+  *03 May 2015 → 18 September 2015*), read directly from
+  `data/events.csv` and cached in memory.
 - A line chart of *events per minute* split by `view`, `addtocart`,
   and `transaction` (last 60 minutes).
 - A table breakdown of the most recent minute.
+
+**Conversion funnel (live)**
+- Three KPIs: View→Cart conversion %, Cart→Transaction conversion %,
+  and overall View→Purchase conversion %.
+- A Plotly funnel chart visually showing the drop-off from views to
+  add-to-cart to actual transactions.
 
 **Batch insights (after running `batch_analysis.py`)**
 - Bar chart of the **Top 20 most viewed items** (required batch
   insight).
 - Bar chart of the **event-type distribution**.
+- **Batch funnel** chart computed over the full 2.75M-event history.
 - Line chart of **daily active visitors**.
 
 ---
@@ -425,7 +568,7 @@ disproportionate share of attention, which is exactly the kind of
 skew that justifies running recommendation and ranking models
 against this data.
 
-### Real-time metric - Events per minute
+### Real-time metric - Events per minute & conversion funnel
 
 Across the full dataset the event-type distribution is:
 
@@ -442,11 +585,12 @@ steep:
 - Only **32.39%** of add-to-cart events convert into a transaction
 - End-to-end **view-to-purchase conversion = 0.84%**
 
-The live dashboard exposes this funnel per minute, which is exactly
-the kind of operational signal a business team would want during
-flash sales or marketing campaigns - if the add-to-cart rate
-suddenly drops, the team can react in minutes instead of waiting
-for tomorrow's batch report.
+The live dashboard exposes this funnel **both per-minute as a line
+chart and as a visual funnel diagram**, which is exactly the kind of
+operational signal a business team would want during flash sales or
+marketing campaigns - if the add-to-cart rate suddenly drops, the
+team can react in minutes instead of waiting for tomorrow's batch
+report.
 
 ### Conclusion
 
@@ -454,23 +598,31 @@ The project demonstrates that a full big-data architecture
 (distributed storage + batch + stream ingest + stream compute +
 live visualization) can be assembled from open-source components
 and run on a single laptop using Docker Compose. The clean
-separation between Kafka (ingest), Spark (compute), MinIO
-(storage), and Streamlit (presentation) means each layer can be
-scaled or replaced independently - for example MinIO could be
-swapped for HDFS or real S3, and the Spark cluster could be scaled
-horizontally with additional `spark-worker` replicas, without any
-change to the producer or dashboard code. The pipeline successfully
-processed **2.75 million events end-to-end**, proving the
-architecture works at realistic dataset sizes on commodity hardware.
+separation between Kafka (ingest), Spark (compute), HDFS
+(distributed storage), and Streamlit (presentation) means each
+layer can be scaled or replaced independently - for example HDFS
+could be scaled by adding more DataNodes, and the Spark cluster
+could be scaled horizontally with additional `spark-worker`
+replicas, without any change to the producer or dashboard code.
+The pipeline successfully processed **2.75 million events
+end-to-end**, proving the architecture works at realistic dataset
+sizes on commodity hardware.
 
 ---
 
 ## 8. Known Limitations
 
 - **Laptop-scale, not production-scale.** Spark runs with a single
-  worker (4 cores / 4 GB). The full RetailRocket dataset (2.75M
+  worker (4 cores / 4 GB) and HDFS runs with one DataNode and a
+  replication factor of 1. The full RetailRocket dataset (2.75M
   events, ~90 MB) completes in a few minutes, but a real cluster
-  would be needed for datasets significantly larger than ~10 GB.
+  would be needed for datasets significantly larger than ~10 GB and
+  for HDFS fault tolerance (typically replication factor 3 with
+  multiple DataNodes).
+- **Single NameNode (no HA).** The HDFS NameNode is a single point
+  of failure. In production this would be addressed with a
+  Standby NameNode + JournalNodes (HDFS HA mode) or by switching to
+  a cloud-managed metadata service.
 - **Spark Standalone resource contention.** Spark Standalone is
   greedy by default: the streaming job claims executor slots on
   the worker the moment it starts. To run the batch job reliably
@@ -485,23 +637,26 @@ architecture works at realistic dataset sizes on commodity hardware.
   fault-tolerant - a broker restart loses in-flight data.
 - **Streaming results are snapshot CSVs.** For dashboarding
   simplicity, the streaming job writes a full-state CSV snapshot
-  every 15 seconds. A production pipeline would typically expose
-  the aggregates through a low-latency store (Redis, Druid,
-  ClickHouse) instead.
-- **No authentication.** MinIO uses default credentials
-  (`minioadmin / minioadmin`) and Streamlit is exposed without
-  auth. Both must be hardened before exposing the stack outside
-  `localhost`.
+  every 15 seconds (in addition to HDFS parquet). A production
+  pipeline would typically expose the aggregates through a
+  low-latency store (Redis, Druid, ClickHouse) instead.
+- **No authentication.** HDFS runs with `dfs.permissions.enabled=false`
+  for simplicity and Streamlit is exposed without auth. Both must be
+  hardened (Kerberos for HDFS, OAuth/SSO for Streamlit) before
+  exposing the stack outside `localhost`.
 - **First-run latency.** The first `docker compose up` downloads
-  several GB of images (Spark, Kafka, MinIO) and Spark must
-  resolve the `spark-sql-kafka` and `hadoop-aws` packages from
-  Maven Central. Allow ~5-10 minutes on the first run.
+  several GB of images (Spark, Kafka, Hadoop NameNode/DataNode) and
+  Spark must resolve the `spark-sql-kafka` package from Maven
+  Central. Allow ~5-10 minutes on the first run.
 - **Dataset must be downloaded manually.** Kaggle requires
   authentication, so the `events.csv` file is not bundled in the
   repository. The pipeline will not start until you place
   `events.csv` in the `data/` folder.
 - **Image namespace pinning.** Bitnami restructured its Docker Hub
-  namespaces in 2025; this project uses `bitnamilegacy/spark:3.5.1`.
-  If that image is ever removed, the same code works with
-  `apache/spark:3.5.1` after adjusting the `spark-submit` paths in
+  namespaces in 2025; this project uses `bitnamilegacy/spark:3.5.1`
+  for Spark and `bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8`
+  /`bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8` for HDFS. If
+  any image is ever removed, the same code works after substituting
+  equivalent images (e.g., `apache/spark:3.5.1` for Spark, or
+  `apache/hadoop:3` for HDFS) and adjusting paths in
   `docker-compose.yml`.

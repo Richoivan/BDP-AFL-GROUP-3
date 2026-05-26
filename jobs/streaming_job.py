@@ -5,9 +5,9 @@ Reads JSON events from Kafka topic `events`, computes a real-time
 metric (events per minute by event type), and continuously writes
 results to:
 
-    - MinIO  s3a://stream-results/events_per_minute   (parquet)
-    - MinIO  s3a://raw-events/                        (raw archive, parquet)
-    - Local /opt/results/stream/events_per_minute.csv (consumed by dashboard)
+    - HDFS  hdfs://namenode:9000/stream-results/events_per_minute  (parquet)
+    - HDFS  hdfs://namenode:9000/raw-events/                       (raw archive, parquet)
+    - Local /opt/results/stream/events_per_minute.csv              (consumed by dashboard)
 
 It also prints a console sink so you can watch the live metric in
 the streaming-job container logs.
@@ -28,8 +28,9 @@ KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "events")
 
 STREAM_LOCAL_OUT = "/opt/results/stream"
-STREAM_S3_OUT = "s3a://stream-results"
-RAW_S3_OUT = "s3a://raw-events"
+HDFS_BASE = os.getenv("HDFS_BASE", "hdfs://namenode:9000")
+STREAM_HDFS_OUT = f"{HDFS_BASE}/stream-results"
+RAW_HDFS_OUT = f"{HDFS_BASE}/raw-events"
 
 CHECKPOINT_BASE = "/opt/results/checkpoints"
 
@@ -39,6 +40,8 @@ def build_spark() -> SparkSession:
         SparkSession.builder.appName("RetailRocketStreamingJob")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.streaming.stopGracefullyOnShutdown", "true")
+        .config("spark.hadoop.fs.defaultFS", HDFS_BASE)
+        .config("spark.hadoop.dfs.client.use.datanode.hostname", "true")
         .getOrCreate()
     )
 
@@ -125,17 +128,20 @@ def main() -> None:
     # 3b. Local CSV sink the Streamlit dashboard reads.
     #     We use foreachBatch so we can overwrite a single CSV that
     #     always contains the latest aggregated state.
+    #     IMPORTANT: prefix with file:// so Spark writes to the local
+    #     filesystem of the worker (mounted from host ./results), and
+    #     NOT to HDFS (which is the default fs.defaultFS).
     def write_to_local_csv(batch_df, batch_id):
-        # Persist a full snapshot of the latest aggregates every micro-batch
         out_dir = os.path.join(STREAM_LOCAL_OUT, "events_per_minute")
         os.makedirs(out_dir, exist_ok=True)
+        spark_path = f"file://{out_dir}"
         try:
             (
                 batch_df.orderBy(F.col("window_start").desc())
                 .coalesce(1)
                 .write.mode("overwrite")
                 .option("header", True)
-                .csv(out_dir)
+                .csv(spark_path)
             )
             print(f"[stream] batch {batch_id}: wrote {batch_df.count()} rows -> {out_dir}")
         except Exception as exc:  # noqa: BLE001
@@ -149,21 +155,21 @@ def main() -> None:
         .start()
     )
 
-    # 3c. MinIO parquet sink for the aggregated metric
+    # 3c. HDFS parquet sink for the aggregated metric
     try:
-        s3_metric_query = (
+        hdfs_metric_query = (
             per_minute.writeStream.outputMode("complete")
             .format("parquet")
-            .option("path", f"{STREAM_S3_OUT}/events_per_minute")
-            .option("checkpointLocation", f"{CHECKPOINT_BASE}/s3_metric")
+            .option("path", f"{STREAM_HDFS_OUT}/events_per_minute")
+            .option("checkpointLocation", f"{CHECKPOINT_BASE}/hdfs_metric")
             .trigger(processingTime="30 seconds")
             .start()
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"[stream] WARN: could not start MinIO metric sink: {exc}")
-        s3_metric_query = None
+        print(f"[stream] WARN: could not start HDFS metric sink: {exc}")
+        hdfs_metric_query = None
 
-    # 3d. MinIO raw archive (append, parquet) so the batch job can replay history
+    # 3d. HDFS raw archive (append, parquet) so the batch job can replay history
     try:
         raw_archive_query = (
             parsed.select(
@@ -177,7 +183,7 @@ def main() -> None:
             )
             .writeStream.outputMode("append")
             .format("parquet")
-            .option("path", f"{RAW_S3_OUT}/")
+            .option("path", f"{RAW_HDFS_OUT}/")
             .option("checkpointLocation", f"{CHECKPOINT_BASE}/raw_archive")
             .trigger(processingTime="30 seconds")
             .start()
