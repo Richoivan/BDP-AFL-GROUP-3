@@ -9,8 +9,9 @@ streaming job has archived to MinIO) and computes a batch insight:
     -> Daily active visitors
 
 Results are written:
-    - to MinIO bucket  s3a://batch-results/  as parquet + csv
-    - to /opt/results/batch/                  as csv (consumed by Streamlit)
+    - to MinIO bucket  s3a://batch-results/         as parquet
+    - to HDFS          hdfs://namenode:9000/results/ as parquet
+    - to /opt/results/batch/                         as csv (consumed by Streamlit)
 """
 
 import os
@@ -29,6 +30,7 @@ from pyspark.sql.types import (
 DATA_FILE = os.getenv("DATA_FILE", "/opt/data/events.csv")
 LOCAL_OUT = os.getenv("BATCH_OUT_LOCAL", "/opt/results/batch")
 S3_OUT = os.getenv("BATCH_OUT_S3", "s3a://batch-results")
+HDFS_OUT = os.getenv("BATCH_OUT_HDFS", "hdfs://namenode:9000/results/batch")
 
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
@@ -135,6 +137,15 @@ def main() -> None:
         print(f"[batch] wrote parquet outputs to {S3_OUT}")
     except Exception as exc:  # noqa: BLE001
         print(f"[batch] WARN: could not write to MinIO ({exc}). Local CSVs are still available.")
+
+    # ---------------- Write results: HDFS parquet ------------------------
+    try:
+        top_items.write.mode("overwrite").parquet(f"{HDFS_OUT}/top_items")
+        event_dist.write.mode("overwrite").parquet(f"{HDFS_OUT}/event_distribution")
+        daily_visitors.write.mode("overwrite").parquet(f"{HDFS_OUT}/daily_visitors")
+        print(f"[batch] wrote parquet outputs to {HDFS_OUT}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[batch] WARN: could not write to HDFS ({exc}). MinIO and local CSVs are still available.")
 
     print("[batch] === Top 20 viewed items ===")
     top_items.show(truncate=False)

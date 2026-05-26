@@ -17,6 +17,7 @@ import time
 from datetime import datetime
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 RESULTS_DIR = os.getenv("RESULTS_DIR", "/results")
@@ -171,6 +172,45 @@ else:
             st.dataframe(event_dist.reset_index(drop=True))
         else:
             st.write("(not available)")
+
+    # ------------------------------------------------------------------
+    # Conversion funnel (view -> addtocart -> transaction)
+    # ------------------------------------------------------------------
+    st.subheader("Conversion Funnel")
+    if not event_dist.empty and "event" in event_dist.columns:
+        funnel_order = ["view", "addtocart", "transaction"]
+        funnel_labels = {"view": "View", "addtocart": "Add to Cart", "transaction": "Transaction"}
+
+        counts = {}
+        for evt in funnel_order:
+            row = event_dist[event_dist["event"] == evt]
+            counts[evt] = int(row["count"].values[0]) if not row.empty else 0
+
+        view_cnt = counts.get("view", 0)
+        addtocart_cnt = counts.get("addtocart", 0)
+        transaction_cnt = counts.get("transaction", 0)
+
+        view_to_addtocart = (addtocart_cnt / view_cnt * 100) if view_cnt > 0 else 0.0
+        addtocart_to_transaction = (transaction_cnt / addtocart_cnt * 100) if addtocart_cnt > 0 else 0.0
+        overall_conversion = (transaction_cnt / view_cnt * 100) if view_cnt > 0 else 0.0
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("View → Add to Cart", f"{view_to_addtocart:.2f}%")
+        m2.metric("Add to Cart → Transaction", f"{addtocart_to_transaction:.2f}%")
+        m3.metric("Overall Conversion (View → Transaction)", f"{overall_conversion:.2f}%")
+
+        fig = go.Figure(
+            go.Funnel(
+                y=[funnel_labels[e] for e in funnel_order],
+                x=[counts[e] for e in funnel_order],
+                textinfo="value+percent initial",
+                marker={"color": ["#4C78A8", "#F58518", "#54A24B"]},
+            )
+        )
+        fig.update_layout(title="User Journey Funnel", height=420, margin={"t": 60})
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.write("(not available)")
 
     st.subheader("Daily active visitors")
     if not daily_visitors.empty:

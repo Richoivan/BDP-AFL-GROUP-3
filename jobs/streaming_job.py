@@ -5,9 +5,10 @@ Reads JSON events from Kafka topic `events`, computes a real-time
 metric (events per minute by event type), and continuously writes
 results to:
 
-    - MinIO  s3a://stream-results/events_per_minute   (parquet)
-    - MinIO  s3a://raw-events/                        (raw archive, parquet)
-    - Local /opt/results/stream/events_per_minute.csv (consumed by dashboard)
+    - MinIO  s3a://stream-results/events_per_minute          (parquet)
+    - MinIO  s3a://raw-events/                               (raw archive, parquet)
+    - HDFS   hdfs://namenode:9000/results/stream/            (parquet)
+    - Local  /opt/results/stream/events_per_minute.csv       (consumed by dashboard)
 
 It also prints a console sink so you can watch the live metric in
 the streaming-job container logs.
@@ -30,6 +31,9 @@ KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "events")
 STREAM_LOCAL_OUT = "/opt/results/stream"
 STREAM_S3_OUT = "s3a://stream-results"
 RAW_S3_OUT = "s3a://raw-events"
+HDFS_NAMENODE = os.getenv("HDFS_NAMENODE", "hdfs://namenode:9000")
+HDFS_STREAM_OUT = f"{HDFS_NAMENODE}/results/stream"
+HDFS_CHECKPOINT_BASE = f"{HDFS_NAMENODE}/user/spark/checkpoints"
 
 CHECKPOINT_BASE = "/opt/results/checkpoints"
 
@@ -185,6 +189,55 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"[stream] WARN: could not start raw archive sink: {exc}")
         raw_archive_query = None
+
+    # 3e. HDFS parquet sink for the aggregated metric (foreachBatch for overwrite semantics)
+    def write_to_hdfs(batch_df, batch_id):
+        hdfs_dir = f"{HDFS_STREAM_OUT}/events_per_minute"
+        try:
+            (
+                batch_df.orderBy(F.col("window_start").desc())
+                .coalesce(1)
+                .write.mode("overwrite")
+                .parquet(hdfs_dir)
+            )
+            print(f"[stream] batch {batch_id}: wrote {batch_df.count()} rows -> HDFS {hdfs_dir}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[stream] WARN: HDFS write failed for batch {batch_id}: {exc}")
+
+    try:
+        hdfs_metric_query = (
+            per_minute.writeStream.outputMode("complete")
+            .foreachBatch(write_to_hdfs)
+            .option("checkpointLocation", f"{HDFS_CHECKPOINT_BASE}/hdfs_metric")
+            .trigger(processingTime="30 seconds")
+            .start()
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[stream] WARN: could not start HDFS metric sink: {exc}")
+        hdfs_metric_query = None
+
+    # 3f. HDFS raw archive (append, parquet)
+    try:
+        hdfs_raw_query = (
+            parsed.select(
+                "timestamp",
+                "event_time",
+                "visitorid",
+                "event",
+                "itemid",
+                "transactionid",
+                "ingest_time",
+            )
+            .writeStream.outputMode("append")
+            .format("parquet")
+            .option("path", f"{HDFS_STREAM_OUT}/raw_archive/")
+            .option("checkpointLocation", f"{HDFS_CHECKPOINT_BASE}/hdfs_raw_archive")
+            .trigger(processingTime="30 seconds")
+            .start()
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[stream] WARN: could not start HDFS raw archive sink: {exc}")
+        hdfs_raw_query = None
 
     print("[stream] Streaming queries started. Awaiting termination...")
     spark.streams.awaitAnyTermination()

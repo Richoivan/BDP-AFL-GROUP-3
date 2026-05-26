@@ -1,7 +1,7 @@
 # =============================================================
 # Big Data Processing - Final Project
 # Pipeline: Kafka (ingest) -> Spark (batch + streaming) ->
-#           MinIO (distributed storage) -> Streamlit (dashboard)
+#           MinIO (distributed storage) + HDFS -> Streamlit (dashboard)
 # =============================================================
 
 services:
@@ -102,6 +102,83 @@ services:
       - bigdata-net
 
   # -----------------------------
+  # HDFS NameNode
+  # -----------------------------
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    environment:
+      - CLUSTER_NAME=bigdata
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_hadoop_http_staticuser_user=root
+      - HDFS_CONF_dfs_replication=1
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+    volumes:
+      - namenode-data:/hadoop/dfs/name
+    ports:
+      - "9870:9870"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870/"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    networks:
+      - bigdata-net
+
+  # -----------------------------
+  # HDFS DataNode
+  # -----------------------------
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    depends_on:
+      namenode:
+        condition: service_healthy
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_replication=1
+    volumes:
+      - datanode-data:/hadoop/dfs/data
+    networks:
+      - bigdata-net
+
+  # -----------------------------
+  # HDFS init - create directories
+  # /user/spark, /data, /results
+  # -----------------------------
+  hdfs-init:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hdfs-init
+    depends_on:
+      namenode:
+        condition: service_healthy
+      datanode:
+        condition: service_started
+    entrypoint: >
+      /bin/bash -c "
+      echo 'Waiting for HDFS to exit safe mode...';
+      for i in $$(seq 1 30); do
+        if hdfs dfsadmin -safemode get 2>/dev/null | grep -q 'Safe mode is OFF'; then
+          echo 'HDFS safe mode is OFF';
+          break;
+        fi;
+        echo \"Attempt $$i: HDFS still in safe mode, retrying in 5s...\";
+        sleep 5;
+      done;
+      hdfs dfs -mkdir -p /user/spark &&
+      hdfs dfs -mkdir -p /data &&
+      hdfs dfs -mkdir -p /results &&
+      hdfs dfs -chmod -R 777 /user/spark /data /results &&
+      echo 'HDFS directories created successfully';
+      exit 0;
+      "
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    networks:
+      - bigdata-net
+
+  # -----------------------------
   # Spark master
   # -----------------------------
   spark-master:
@@ -171,7 +248,7 @@ services:
 
   # -----------------------------
   # Spark Streaming job
-  # consumes Kafka -> MinIO + CSV
+  # consumes Kafka -> MinIO + HDFS + CSV
   # -----------------------------
   streaming-job:
     image: bitnamilegacy/spark:3.5.1
@@ -182,6 +259,8 @@ services:
       spark-master:
         condition: service_started
       minio-setup:
+        condition: service_completed_successfully
+      hdfs-init:
         condition: service_completed_successfully
     volumes:
       - ./jobs:/opt/jobs
@@ -201,6 +280,7 @@ services:
       --conf spark.hadoop.fs.s3a.path.style.access=true
       --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
       --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false
+      --conf spark.hadoop.dfs.client.use.datanode.hostname=true
       /opt/jobs/streaming_job.py
     networks:
       - bigdata-net
@@ -229,6 +309,8 @@ services:
 
 volumes:
   minio-data:
+  namenode-data:
+  datanode-data:
 
 networks:
   bigdata-net:
