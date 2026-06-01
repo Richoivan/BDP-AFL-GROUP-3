@@ -140,6 +140,7 @@ with a backslash `\`.
 - **Python 3** installed locally (only used by the dataset download
   helper)
 - A **Kaggle account** (required by `kagglehub` to download the dataset)
+- **Apple Silicon Notes (M1/M2/M3 Macs)** -> If you are using an Apple Silicon Mac (M1, M2, or M3), Docker may show warnings such as: **"The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8)"**. This is expected on Apple Silicon Macs and can be **safely ignored**. Docker Desktop automatically runs these images through emulation. As long as the containers are running normally (docker compose ps shows Up or Healthy), the project is working correctly.
 
 ### 5.1. Clone the repository
 
