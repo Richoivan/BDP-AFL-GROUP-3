@@ -9,69 +9,28 @@ by **Docker Compose** and runnable on a single laptop.
 
 ## 1. Architecture Diagram
 
-```
-                  +---------------------+
-                  |  data/events.csv    |
-                  |  (RetailRocket)     |
-                  +----------+----------+
-                             |
-                  +----------+-----------+
-                  |                      |
-                  v                      v
-       +---------------------+   +-------------------+
-       |   Kafka Producer    |   |    hdfs-setup     |
-       |  producer/producer  |   |   (one-shot)      |
-       +----------+----------+   |  uploads CSV ->   |
-                  | JSON events  |  HDFS /raw-data   |
-                  v              +---------+---------+
-+----------+   +-------------+             |
-| Zookeeper|<->|  Kafka      |             |
-+----------+   +-----+-------+             |
-                     |                     |
-                     v                     v
-        +-----------------------------+   +-----------------------------+
-        |  Spark Structured Streaming |   |     HDFS Cluster            |
-        |  jobs/streaming_job.py      |   |    (Distributed FS)         |
-        |  - events per minute        |   |  +-----------------------+  |
-        |  - raw event archive        |   |  |     NameNode          |  |
-        +------+------------+---------+   |  |    (metadata)         |  |
-               |            |             |  +-----------+-----------+  |
-       parquet |            | csv snap    |              |              |
-               |            |             |  +-----------v-----------+  |
-               v            v             |  |     DataNode          |  |
-       +-------+-------+  +--+-------+    |  |    (blocks)           |  |
-       |  HDFS write   |  | local    |    |  +-----------------------+  |
-       +-------+-------+  | /results |    |                             |
-               |          +----+-----+    |  /raw-data/events.csv       |
-               v               |          |  /raw-events/               |
-       +---------------+       |          |  /stream-results/           |
-       |  HDFS dirs:   |<------+--------->|  /batch-results/            |
-       |  /stream-     |       |          +-------------+---------------+
-       |  /raw-events  |       |                        ^
-       |  /batch-      |       |                        | reads
-       +---------------+       |                        | events.csv
-                               v                        | & writes
-                       +---------------+    +-----------+---------+
-                       |   Streamlit   |    | Spark Batch Job     |
-                       |  dashboard    |    | jobs/batch_         |
-                       |  - live KPIs  |    | analysis.py         |
-                       |  - funnel     |    | top items, etc.     |
-                       |  - batch      |    +---------------------+
-                       +-------+-------+
-                               |
-                               v
-                       http://localhost:8501
-```
+![Architecture Diagram](docs/architecture.png)
 
-Data-flow (two parallel paths):
+**Data-flow (two parallel paths):**
 
-1. **Stream path:** `CSV -> Producer -> Kafka -> Spark Streaming -> HDFS (raw-events, stream-results) -> Dashboard`
-2. **Batch path:** `CSV -> hdfs-setup (upload to HDFS /raw-data) -> Spark Batch reads from HDFS -> HDFS (batch-results) + local CSV -> Dashboard`
+1. **Stream path:** `CSV -> Kafka Producer -> Kafka Broker (topic: events) -> Spark Structured Streaming -> HDFS (raw-events, stream-results) + local ./results/ snapshot -> Streamlit Dashboard`
+2. **Batch path:** `CSV -> hdfs-setup (uploads to HDFS /raw-data) -> Spark Batch Job reads from HDFS -> HDFS (batch-results) + local ./results/batch -> Streamlit Dashboard`
 
-This means the dataset itself **lives in HDFS** (uploaded automatically
-by the `hdfs-setup` container on first start). The batch job reads
-`events.csv` directly from HDFS, demonstrating end-to-end use of
-distributed storage as the dataset source — not just as a results
+**Key components shown in the diagram:**
+
+- **data/events.csv (RetailRocket)** — source dataset
+- **Kafka Producer (Python)** — reads CSV row-by-row and publishes JSON events
+- **Zookeeper + Kafka Broker** — stream ingest layer (topic `events`)
+- **Spark Structured Streaming** — consumes Kafka, computes events-per-minute, archives raw events
+- **Spark Batch Job** — computes top items, event distribution, daily visitors from HDFS
+- **HDFS Cluster (Distributed FS)** — NameNode (metadata) + DataNode (blocks) holding `raw-data/`, `raw-events/`, `stream-results/`, `batch-results/`
+- **./results/ (local volume)** — CSV snapshots that the Streamlit dashboard reads
+- **Streamlit dashboard** — live charts, funnel chart, batch charts at <http://localhost:8501>
+
+The dataset itself **lives in HDFS** (uploaded automatically by the
+`retailrocket-hdfs-setup` container on first start). The batch job
+reads `events.csv` directly from HDFS, demonstrating end-to-end use
+of distributed storage as the dataset source — not just as a results
 sink.
 
 ---
@@ -231,18 +190,22 @@ You should see **10 containers**. All should be `Up`/`running` except
 `hdfs-setup` which is a one-shot HDFS directory creator and finishes as
 `Exited (0)`:
 
-| Container       | Role                                       |
-|-----------------|--------------------------------------------|
-| zookeeper       | Kafka coordinator                          |
-| kafka           | Stream-ingest broker                       |
-| namenode        | HDFS NameNode (metadata server)            |
-| datanode        | HDFS DataNode (block storage)              |
-| hdfs-setup     | One-shot HDFS dir creator + uploads events.csv to HDFS (Exited 0 is OK) |
-| spark-master    | Spark cluster master                       |
-| spark-worker    | Spark cluster worker (4 cores / 4 GB)      |
-| producer        | Kafka producer streaming events.csv        |
-| streaming-job   | Spark Structured Streaming consumer        |
-| dashboard       | Streamlit live dashboard                   |
+| Container                        | Role                                       |
+|----------------------------------|--------------------------------------------|
+| retailrocket-zookeeper           | Kafka coordinator                          |
+| retailrocket-kafka               | Stream-ingest broker                       |
+| retailrocket-namenode            | HDFS NameNode (metadata server)            |
+| retailrocket-datanode            | HDFS DataNode (block storage)              |
+| retailrocket-hdfs-setup          | One-shot HDFS dir creator + uploads events.csv to HDFS (Exited 0 is OK) |
+| retailrocket-spark-master        | Spark cluster master                       |
+| retailrocket-spark-worker        | Spark cluster worker (4 cores / 4 GB)      |
+| retailrocket-producer            | Kafka producer streaming events.csv        |
+| retailrocket-streaming-job       | Spark Structured Streaming consumer        |
+| retailrocket-dashboard           | Streamlit live dashboard                   |
+
+All container names are prefixed with `retailrocket-` so they are
+globally unique on your Docker host (won't clash with other projects
+that have generic names like `kafka` or `namenode`).
 
 ### 5.5. Watch the streaming job warm up (optional)
 
@@ -305,7 +268,7 @@ The **working sequence** is therefore:
 2. **Run the batch job:**
 
    ```powershell
-   docker exec spark-master /opt/bitnami/spark/bin/spark-submit `
+   docker exec retailrocket-spark-master /opt/bitnami/spark/bin/spark-submit `
      --master spark://spark-master:7077 `
      --conf spark.cores.max=4 `
      --conf spark.executor.cores=2 `
@@ -316,10 +279,10 @@ The **working sequence** is therefore:
    ```
 
    We use `docker exec` (not `docker compose run`) so the job reuses
-   the already-running `spark-master` container instead of spawning a
-   fresh one. Because the streaming job is stopped in step 1, the
-   worker has all four cores free, so the batch job is given the full
-   `cores.max=4 / executor.cores=2 / executor.memory=2g`.
+   the already-running `retailrocket-spark-master` container instead
+   of spawning a fresh one. Because the streaming job is stopped in
+   step 1, the worker has all four cores free, so the batch job is
+   given the full `cores.max=4 / executor.cores=2 / executor.memory=2g`.
 
    The batch job reads the dataset **directly from HDFS**
    (`hdfs://namenode:9000/raw-data/events.csv`, uploaded by
@@ -396,9 +359,9 @@ events flowing in from Kafka, along with the live conversion funnel.
 You can also inspect HDFS from the command line:
 
 ```powershell
-docker exec namenode hdfs dfs -ls /
-docker exec namenode hdfs dfs -ls -h /raw-data
-docker exec namenode hdfs dfs -ls /batch-results/top_items
+docker exec retailrocket-namenode hdfs dfs -ls /
+docker exec retailrocket-namenode hdfs dfs -ls -h /raw-data
+docker exec retailrocket-namenode hdfs dfs -ls /batch-results/top_items
 ```
 
 The second command should show `events.csv` (~90 MB) sitting inside

@@ -11,7 +11,7 @@ services:
   # -----------------------------
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
-    container_name: zookeeper
+    container_name: retailrocket-zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -25,7 +25,7 @@ services:
   # -----------------------------
   kafka:
     image: confluentinc/cp-kafka:7.5.0
-    container_name: kafka
+    container_name: retailrocket-kafka
     depends_on:
       - zookeeper
     ports:
@@ -52,7 +52,7 @@ services:
   # -----------------------------
   namenode:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
-    container_name: namenode
+    container_name: retailrocket-namenode
     hostname: namenode
     ports:
       - "9870:9870"     # Web UI (Hadoop 3.x)
@@ -80,7 +80,7 @@ services:
   # -----------------------------
   datanode:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
-    container_name: datanode
+    container_name: retailrocket-datanode
     hostname: datanode
     depends_on:
       - namenode
@@ -102,7 +102,7 @@ services:
   # -----------------------------
   hdfs-setup:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
-    container_name: hdfs-setup
+    container_name: retailrocket-hdfs-setup
     depends_on:
       - namenode
       - datanode
@@ -150,7 +150,7 @@ services:
   # -----------------------------
   spark-master:
     image: bitnamilegacy/spark:3.5.1
-    container_name: spark-master
+    container_name: retailrocket-spark-master
     environment:
       - SPARK_MODE=master
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
@@ -173,7 +173,7 @@ services:
   # -----------------------------
   spark-worker:
     image: bitnamilegacy/spark:3.5.1
-    container_name: spark-worker
+    container_name: retailrocket-spark-worker
     depends_on:
       - spark-master
     environment:
@@ -199,7 +199,7 @@ services:
   producer:
     build:
       context: ./producer
-    container_name: producer
+    container_name: retailrocket-producer
     depends_on:
       kafka:
         condition: service_healthy
@@ -220,7 +220,7 @@ services:
   # -----------------------------
   streaming-job:
     image: bitnamilegacy/spark:3.5.1
-    container_name: streaming-job
+    container_name: retailrocket-streaming-job
     depends_on:
       kafka:
         condition: service_healthy
@@ -255,7 +255,7 @@ services:
   dashboard:
     build:
       context: ./dashboard
-    container_name: dashboard
+    container_name: retailrocket-dashboard
     depends_on:
       - namenode
     ports:
