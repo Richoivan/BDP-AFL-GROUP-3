@@ -144,8 +144,8 @@ with a backslash `\`.
 ### 5.1. Clone the repository
 
 ```powershell
-git clone <your-repo-url>
-cd "BIG DATA  PROCESSING_ALP"
+git clone https://github.com/Richoivan/BDP-AFL-GROUP-3.git
+cd BDP-AFL-GROUP-3
 ```
 
 ### 5.2. Download the RetailRocket dataset
