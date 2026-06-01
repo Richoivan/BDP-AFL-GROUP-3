@@ -12,6 +12,14 @@ by **Docker Compose** and runnable on a single laptop.
 - Natalie Grace Widjaja Kuswanto (0706022310004)
 - Richo Ivan Ardiyanto (0706022310007)
 ---
+## Quick Access URLs
+
+| Service | URL |
+|----------|----------|
+| Dashboard | http://localhost:8501 |
+| Spark UI | http://localhost:8080 |
+| HDFS UI | http://localhost:9870 |
+---
 
 ## 1. Architecture Diagram
 
