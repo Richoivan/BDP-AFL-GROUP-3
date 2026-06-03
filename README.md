@@ -274,7 +274,7 @@ The **working sequence** is therefore:
 2. **Run the batch job:**
 
    ```powershell
-   docker exec retailrocket-spark-master /opt/bitnami/spark/bin/spark-submit `
+   docker exec retailrocket-spark-master /opt/bitnami/spark/bin/spark-submit \
      --master spark://spark-master:7077 `
      --conf spark.cores.max=4 `
      --conf spark.executor.cores=2 `
