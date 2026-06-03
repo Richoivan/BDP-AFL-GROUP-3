@@ -275,12 +275,12 @@ The **working sequence** is therefore:
 
    ```powershell
    docker exec retailrocket-spark-master /opt/bitnami/spark/bin/spark-submit \
-     --master spark://spark-master:7077 `
-     --conf spark.cores.max=4 `
-     --conf spark.executor.cores=2 `
-     --conf spark.executor.memory=2g `
-     --conf spark.hadoop.fs.defaultFS=hdfs://namenode:9000 `
-     --conf spark.hadoop.dfs.client.use.datanode.hostname=true `
+     --master spark://spark-master:7077 \
+     --conf spark.cores.max=4 \
+     --conf spark.executor.cores=2 \
+     --conf spark.executor.memory=2g \
+     --conf spark.hadoop.fs.defaultFS=hdfs://namenode:9000 \
+     --conf spark.hadoop.dfs.client.use.datanode.hostname=true \
      /opt/jobs/batch_analysis.py
    ```
 
