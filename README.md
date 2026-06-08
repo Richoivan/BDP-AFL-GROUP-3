@@ -6,11 +6,11 @@ Built with **Kafka, Apache Spark (batch + Structured Streaming), HDFS
 by **Docker Compose** and runnable on a single laptop.
 
 **Team 3**
-- Dwinda Audia I. (0706022310047)
-- Howie Homan (0706022310040)
-- Jessica Laurentia Tedja (0706022310008)
-- Natalie Grace Widjaja Kuswanto (0706022310004)
-- Richo Ivan Ardiyanto (0706022310007)
+- Dwinda Audia I. / 0706022310047
+- Howie Homan / 0706022310040
+- Jessica Laurentia Tedja / 0706022310008
+- Natalie Grace Widjaja Kuswanto / 0706022310004
+- Richo Ivan Ardiyanto / 0706022310007
 
 ## 1. Architecture Diagram
 
